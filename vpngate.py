@@ -7,7 +7,7 @@ VPN Gate SSTP 节点检测流水线 (精简版)
   2. 只保留带 TCP 入口的 SSTP 节点
   3. 去重
   4. 并发调用检测 Worker
-  5. 生成 public/data.json + public/index.html + public/nodes.txt
+  5. 生成 public/data.json + public/index.html + public/nodes.txt + public/sstp.txt
 """
 
 import base64
@@ -305,6 +305,7 @@ EDGE_HOSTS = [
 ]
 
 NODES_URL = os.environ.get("NODES_URL", "https://xingke112-1.github.io/gate/nodes.txt")
+SSTP_URL = os.environ.get("SSTP_URL", "https://xingke112-1.github.io/gate/sstp.txt")
 
 def build_nodes_text(data):
     """生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://..."""
@@ -330,6 +331,28 @@ def build_nodes_text(data):
             lines.append(f"{entry}#{zh}-机房-{i:02d}$sstp://vpn:vpn@{n['host']}:{n['port']}")
     return "\n".join(lines) + "\n"
 
+def build_sstp_text(data):
+    """生成 v2rayN 可直接导入的订阅: 每行一条裸 sstp:// 链接, 名字放 # 后面 (百分号编码)。
+
+    与 nodes.txt 同样的国家/住宅优先/延迟排序, 只换行格式: nodes.txt 是给
+    edgetunnel 的优选 IP 格式 (入口地址#名字$sstp://...), 客户端认不了;
+    sstp.txt 是标准订阅格式, 贴进 v2rayN 的订阅地址就能出节点。
+    """
+    countries = data["countries"]
+    lines = []
+    ordered = sorted(countries.items(), key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])))
+    for cname, grp in ordered:
+        code = str(grp.get("code") or "?").upper()
+        zh = COUNTRY_ZH.get(code) or (code if code and code != "?" else cname)
+        nodes = sorted(grp["nodes"], key=lambda n: (0 if n.get("residential") == "residential" else 1, n.get("latency_ms") is None, n.get("latency_ms") or 0, n.get("host") or ""))
+        res_nodes = [n for n in nodes if n.get("residential") == "residential"]
+        dc_nodes = [n for n in nodes if n.get("residential") != "residential"]
+        for i, n in enumerate(res_nodes, 1):
+            lines.append(f"sstp://vpn:vpn@{n['host']}:{n['port']}#{quote(f'{zh}-住宅-{i:02d}', safe='')}")
+        for i, n in enumerate(dc_nodes, 1):
+            lines.append(f"sstp://vpn:vpn@{n['host']}:{n['port']}#{quote(f'{zh}-机房-{i:02d}', safe='')}")
+    return "\n".join(lines) + "\n"
+
 def write_outputs(data):
     os.makedirs(PUBLIC_DIR, exist_ok=True)
     data_path = os.path.join(PUBLIC_DIR, "data.json")
@@ -351,7 +374,11 @@ def write_outputs(data):
     with open(nodes_path, "w", encoding="utf-8") as f:
         f.write(build_nodes_text(data))
 
-    return data_path, html_path, nodes_path
+    sstp_path = os.path.join(PUBLIC_DIR, "sstp.txt")
+    with open(sstp_path, "w", encoding="utf-8") as f:
+        f.write(build_sstp_text(data))
+
+    return data_path, html_path, nodes_path, sstp_path
 
 # ---------------------------------------------------------------------------
 # main
@@ -396,11 +423,13 @@ def main():
     log("RESULT", f"可用节点: {len(success)}")
     log("RESULT", f"国家数量: {data['stats']['countries']}")
 
-    data_path, html_path, nodes_path = write_outputs(data)
+    data_path, html_path, nodes_path, sstp_path = write_outputs(data)
     log("WEBSITE", f"生成 {os.path.relpath(data_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(html_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(nodes_path, REPO_DIR)}")
+    log("WEBSITE", f"生成 {os.path.relpath(sstp_path, REPO_DIR)}")
     log("USAGE", f"自动轮换: 把 {NODES_URL} 填入 edgetunnel 后台「自定义优选IP」框 (一次配置, 之后每 30 分钟自动更新)")
+    log("USAGE", f"v2rayN 订阅: 把 {SSTP_URL} 填入订阅地址 (每小时自动更新)")
     log("WEBSITE", "完成 (GitHub Pages 部署由 workflow 执行)")
 
 if __name__ == "__main__":
